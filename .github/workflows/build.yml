@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are needed to derive the version
+
+      - name: Build
+        id: build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/BrightnessGlass.exe -ArgumentList '--version' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
+          (Get-Item dist/BrightnessGlass.exe).VersionInfo | Format-List ProductVersion, FileVersion
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BrightnessGlass-${{ steps.build.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BrightnessGlass ${{ steps.build.outputs.version }}
+          files: dist/*
+          generate_release_notes: true

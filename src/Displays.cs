@@ -53,6 +53,8 @@ abstract class Display
     public string Name;
     public uint Max = 100;
     public uint Current;
+    public Rectangle Bounds;   // desktop coordinates; Empty if unknown
+    public bool Primary;
 
     public abstract bool Read();
     public abstract bool Set(uint percent);
@@ -60,14 +62,72 @@ abstract class Display
 
     public int Percent { get { return Max == 0 ? 0 : (int)Math.Round(Current * 100.0 / Max); } }
 
-    // laptop panel first, then external DDC/CI monitors
+    // all controllable displays, ordered like the Windows arrangement (left to right, then top to bottom)
     public static List<Display> EnumerateAll()
     {
         var all = new List<Display>();
         var panel = LaptopPanel.TryCreate();
         if (panel != null) all.Add(panel);
         all.AddRange(Monitor.EnumerateDdc());
-        return all;
+        var ordered = Arrange(all);
+
+        // identical models: number them in arrangement order, so "#1" is the leftmost
+        foreach (var g in ordered.GroupBy(x => x.Name).Where(g => g.Count() > 1).ToList())
+        {
+            int k = 1;
+            foreach (var d in g) d.Name += " #" + k++;
+        }
+        return ordered;
+    }
+
+    // reading order of the Windows layout: displays overlapping vertically by at least half form a row;
+    // rows top to bottom, left to right within a row; unknown positions last
+    public static List<Display> Arrange(List<Display> all)
+    {
+        var rows = new List<List<Display>>();
+        var spans = new List<int[]>();
+        foreach (var d in all.Where(x => !x.Bounds.IsEmpty).OrderBy(x => x.Bounds.Top))
+        {
+            int row = -1;
+            for (int i = 0; i < spans.Count && row < 0; i++)
+            {
+                int overlap = Math.Min(spans[i][1], d.Bounds.Bottom) - Math.Max(spans[i][0], d.Bounds.Top);
+                if (overlap * 2 >= Math.Min(d.Bounds.Height, spans[i][1] - spans[i][0])) row = i;
+            }
+            if (row < 0) { rows.Add(new List<Display>()); spans.Add(new[] { d.Bounds.Top, d.Bounds.Bottom }); row = rows.Count - 1; }
+            rows[row].Add(d);
+            spans[row][0] = Math.Min(spans[row][0], d.Bounds.Top);
+            spans[row][1] = Math.Max(spans[row][1], d.Bounds.Bottom);
+        }
+        var result = rows.SelectMany(r => r.OrderBy(x => x.Bounds.X)).ToList();
+        result.AddRange(all.Where(x => x.Bounds.IsEmpty));
+        return result;
+    }
+
+    public class Output { public string DeviceId; public Rectangle Bounds; public bool Primary; public IntPtr HMonitor; public uint Index; }
+
+    // every physical output with its device interface id ("\\?\DISPLAY#LEN66F2#5&...#{guid}") and desktop rectangle
+    public static List<Output> Outputs()
+    {
+        var list = new List<Output>();
+        Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (hMon, hdc, rc, data) =>
+        {
+            var info = new Native.MONITORINFOEX { cbSize = Marshal.SizeOf(typeof(Native.MONITORINFOEX)) };
+            if (!Native.GetMonitorInfo(hMon, ref info)) return true;
+            var r = info.rcMonitor;
+            for (uint i = 0; ; i++)
+            {
+                var dd = new Native.DISPLAY_DEVICE { cb = Marshal.SizeOf(typeof(Native.DISPLAY_DEVICE)) };
+                if (!Native.EnumDisplayDevices(info.szDevice, i, ref dd, 1 /* EDD_GET_DEVICE_INTERFACE_NAME */)) break;
+                list.Add(new Output
+                {
+                    DeviceId = dd.DeviceID, HMonitor = hMon, Index = i, Primary = (info.dwFlags & 1) != 0,
+                    Bounds = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom)
+                });
+            }
+            return true;
+        }, IntPtr.Zero);
+        return list;
     }
 
     public static void Release(IEnumerable<Display> displays)
@@ -82,7 +142,30 @@ class LaptopPanel : Display
     public static LaptopPanel TryCreate()
     {
         var p = new LaptopPanel { Name = L.LaptopDisplay };
-        return p.Read() ? p : null;
+        if (!p.Read()) return null;
+        p.Locate();
+        return p;
+    }
+
+    // WMI instance "DISPLAY\AUO408D\5&655aead&0&UID256_0" <-> device id "\\?\DISPLAY#AUO408D#5&655aead&0&UID256#{...}"
+    void Locate()
+    {
+        try
+        {
+            string inst = null;
+            using (var s = new ManagementObjectSearcher(@"root\wmi", "SELECT InstanceName FROM WmiMonitorBrightness WHERE Active=TRUE"))
+            foreach (ManagementObject o in s.Get()) { inst = (string)o["InstanceName"]; break; }
+            if (inst == null) return;
+            var parts = inst.Split('\\');
+            if (parts.Length < 3) return;
+            string pnp = parts[2];
+            int us = pnp.LastIndexOf('_');
+            if (us > 0) pnp = pnp.Substring(0, us);
+            string key = ("#" + parts[1] + "#" + pnp + "#").ToUpperInvariant();
+            foreach (var o in Outputs())
+                if (o.DeviceId != null && o.DeviceId.ToUpperInvariant().Contains(key)) { Bounds = o.Bounds; Primary = o.Primary; return; }
+        }
+        catch { }
     }
 
     public override bool Read()
@@ -177,18 +260,14 @@ class Monitor : Display
             {
                 var m = new Monitor { Handle = phys[i].hPhysicalMonitor };
                 m.Name = FriendlyName(info.szDevice, i) ?? phys[i].szPhysicalMonitorDescription;
+                var r = info.rcMonitor;
+                m.Bounds = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+                m.Primary = (info.dwFlags & 1) != 0;
                 if (m.Read()) all.Add(m);
                 else Native.DestroyPhysicalMonitor(m.Handle); // internal panel etc. - no DDC/CI
             }
             return true;
         }, IntPtr.Zero);
-
-        // disambiguate identical model names
-        foreach (var g in all.GroupBy(x => x.Name).Where(g => g.Count() > 1))
-        {
-            int k = 1;
-            foreach (var m in g) m.Name += " #" + k++;
-        }
         return all;
     }
 

@@ -22,6 +22,8 @@ static class L
     public static readonly string AutoTitle = T("Automatisch nach Sonnenstand", "Follow the sun automatically");
     public static readonly string AllDisplays = T("Alle Bildschirme", "All displays");
     public static readonly string LaptopDisplay = T("Laptop-Display", "Laptop display");
+    public static readonly string PrimaryTag = T("Hauptanzeige", "Main display");
+    public static readonly string Identify = T("Identifizieren", "Identify");
 
     // menu / tray
     public static readonly string MenuSettings = T("Einstellungen…", "Settings…");

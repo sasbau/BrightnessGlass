@@ -47,6 +47,28 @@ static class Glass
         SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2), true);
     }
 
+    // put a premultiplied 32-bit bitmap on a WS_EX_LAYERED window with the given overall opacity
+    public static void Push(Form f, Bitmap bmp, byte alpha)
+    {
+        IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen);
+        IntPtr hbmp = bmp.GetHbitmap(Color.FromArgb(0)), old = SelectObject(mem, hbmp);
+        try
+        {
+            var size = new SIZE(bmp.Width, bmp.Height);
+            var src = new POINT(0, 0);
+            var dst = new POINT(f.Left, f.Top);
+            var blend = new BLENDFUNCTION { Op = 0, Flags = 0, Alpha = alpha, Format = 1 /* AC_SRC_ALPHA */ };
+            UpdateLayeredWindow(f.Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2 /* ULW_ALPHA */);
+        }
+        finally
+        {
+            SelectObject(mem, old);
+            DeleteObject(hbmp);
+            DeleteDC(mem);
+            ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
     public static GraphicsPath Round(RectangleF r, float rad)
     {
         var p = new GraphicsPath();
@@ -62,7 +84,7 @@ static class Glass
 
 class GlassPopup : Form
 {
-    class Slider { public RectangleF Track; public int Value; public Display Disp; } // Disp == null -> master
+    class Slider { public RectangleF Track, Tile; public int Value; public Display Disp; } // Disp == null -> master
     class Item { public RectangleF Rect; public string Text, Hint; public Action Click; }
 
     readonly Controller ctl;
@@ -78,9 +100,10 @@ class GlassPopup : Form
     List<Item> items = new List<Item>();
     RectangleF toggleRect;
     string status = "";
-    Slider dragging;
+    Slider dragging, hoverTile;
     Item hover;
     int W, H;
+    readonly ToolTip tip = new ToolTip();
 
     public GlassPopup(Controller ctl, Action openSettings, Action quit, Func<string> presetHint)
     {
@@ -117,7 +140,8 @@ class GlassPopup : Form
     // ---------------------------------------------------------------- layout
     void Layout_()
     {
-        W = (int)S(360);
+        bool tiles = ctl.Displays.Exists(d => !d.Bounds.IsEmpty);
+        W = (int)S(tiles ? 400 : 360);
         float pad = S(12), cp = S(16), y = pad, cardW = W - 2 * pad;
         sliders.Clear(); items.Clear();
 
@@ -125,16 +149,18 @@ class GlassPopup : Form
         y += S(64) + S(10);
         toggleRect = new RectangleF(W - pad - cp - S(40), pad + S(14), S(40), S(24));
 
-        // card 2: master ("All")
-        float trackW = cardW - 2 * cp - S(52);
-        sliders.Add(new Slider { Track = new RectangleF(pad + cp, y + S(42), trackW, S(28)), Value = ctl.S.Master });
+        // card 2: master ("All"); arrangement tile in its own column right of the percentage
+        float tileW = tiles ? S(84) : 0, tileGap = tiles ? S(12) : 0;
+        float trackW = cardW - 2 * cp - S(52) - tileW - tileGap;
+        float tileX = pad + cardW - cp - tileW;
+        sliders.Add(MakeSlider(new RectangleF(pad + cp, y + S(42), trackW, S(28)), ctl.S.Master, null, tileX, tileW));
         y += S(88) + S(10);
 
         // card 3: one row per display
         float y0 = y + S(14);
         foreach (var d in ctl.Displays)
         {
-            sliders.Add(new Slider { Track = new RectangleF(pad + cp, y0 + S(26), trackW, S(28)), Value = d.Percent, Disp = d });
+            sliders.Add(MakeSlider(new RectangleF(pad + cp, y0 + S(26), trackW, S(28)), d.Percent, d, tileX, tileW));
             y0 += S(70);
         }
         if (ctl.Displays.Count > 0) y = y0 + S(4) + S(8);
@@ -145,6 +171,17 @@ class GlassPopup : Form
         items.Add(new Item { Rect = new RectangleF(pad, y, cardW, S(30)), Text = L.MenuQuit, Click = () => { Hide(); quit(); } });
         y += S(30) + pad - S(4);
         H = (int)y;
+    }
+
+    Slider MakeSlider(RectangleF track, int value, Display d, float tileX, float tileW)
+    {
+        var sl = new Slider { Track = track, Value = value, Disp = d };
+        if (tileW > 0 && (d == null || !d.Bounds.IsEmpty))
+        {
+            float top = track.Y - S(27), center = (top + track.Bottom) / 2;
+            sl.Tile = new RectangleF(tileX, center - S(23), tileW, S(46));
+        }
+        return sl;
     }
 
     // ---------------------------------------------------------------- render
@@ -178,6 +215,7 @@ class GlassPopup : Form
                 Card(g, new RectangleF(pad, y, cardW, S(88)));
                 g.DrawString(L.AllDisplays, fTitle, Brushes.White, pad + cp, y + S(13));
                 DrawSlider(g, sliders[0]);
+                DrawTile(g, sliders[0]);
                 y += S(88) + S(10);
 
                 // card 3: displays
@@ -188,9 +226,12 @@ class GlassPopup : Form
                     for (int i = 1; i < sliders.Count; i++)
                     {
                         var sl = sliders[i];
+                        float ny = sl.Track.Y - S(25);
                         using (var b = new SolidBrush(Color.FromArgb(225, 255, 255, 255)))
-                            g.DrawString(sl.Disp.Name, fTitle, b, pad + cp, sl.Track.Y - S(25));
+                            g.DrawString(sl.Disp.Name, fTitle, b, pad + cp, ny);
+                        if (sl.Disp.Primary) DrawTag(g, L.PrimaryTag, pad + cp + g.MeasureString(sl.Disp.Name, fTitle).Width + S(4), ny + S(1));
                         DrawSlider(g, sl);
+                        DrawTile(g, sl);
                     }
                 }
 
@@ -220,6 +261,55 @@ class GlassPopup : Form
         {
             using (var b = new SolidBrush(Color.FromArgb(22, 255, 255, 255))) g.FillPath(b, p);
             using (var pen = new Pen(Color.FromArgb(40, 255, 255, 255), 1)) g.DrawPath(pen, p);
+        }
+    }
+
+    void DrawTag(Graphics g, string text, float x, float y)
+    {
+        var sz = g.MeasureString(text, fSmall);
+        var r = new RectangleF(x, y, sz.Width + S(8), S(19));
+        using (var p = Glass.Round(r, S(6)))
+        using (var b = new SolidBrush(Color.FromArgb(50, 255, 255, 255))) g.FillPath(b, p);
+        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        using (var b = new SolidBrush(Color.FromArgb(230, 255, 255, 255))) g.DrawString(text, fSmall, b, r, sf);
+    }
+
+    // miniature of the Windows arrangement; this display filled, the others outlined (master: all filled)
+    void DrawTile(Graphics g, Slider sl)
+    {
+        if (sl.Tile.IsEmpty) return;
+        using (var p = Glass.Round(sl.Tile, S(10)))
+        using (var b = new SolidBrush(Color.FromArgb(sl == hoverTile ? 60 : 28, 255, 255, 255))) g.FillPath(b, p);
+
+        var known = ctl.Displays.FindAll(d => !d.Bounds.IsEmpty);
+        if (known.Count == 0) return;
+        var u = known[0].Bounds;
+        foreach (var d in known) u = Rectangle.Union(u, d.Bounds);
+
+        var inner = RectangleF.Inflate(sl.Tile, -S(8), -S(9));
+        float stand = S(4);
+        float sc = Math.Min(inner.Width / u.Width, (inner.Height - stand) / u.Height);
+        float ox = inner.X + (inner.Width - u.Width * sc) / 2, oy = inner.Y + (inner.Height - stand - u.Height * sc) / 2;
+
+        using (var fill = new SolidBrush(Color.FromArgb(240, 255, 255, 255)))
+        using (var dim = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
+        using (var pen = new Pen(Color.FromArgb(140, 255, 255, 255), Math.Max(1, S(1))))
+        {
+            foreach (var d in known)
+            {
+                var r = new RectangleF(ox + (d.Bounds.X - u.X) * sc, oy + (d.Bounds.Y - u.Y) * sc, d.Bounds.Width * sc, d.Bounds.Height * sc);
+                r.Inflate(-S(1), -S(1));
+                bool on = sl.Disp == null || sl.Disp == d;
+                using (var path = Glass.Round(r, S(2)))
+                {
+                    if (on) g.FillPath(fill, path); else g.DrawPath(pen, path);
+                }
+                // stand only if no display sits directly below (stacked layouts)
+                bool below = known.Exists(o => o != d && o.Bounds.Top >= d.Bounds.Bottom - 1 && o.Bounds.Top - d.Bounds.Bottom < d.Bounds.Height / 4
+                                               && o.Bounds.Left < d.Bounds.Right && o.Bounds.Right > d.Bounds.Left);
+                float sw = Math.Max(S(3), r.Width * 0.16f);
+                if (!below) g.FillRectangle(on ? fill : dim, r.X + (r.Width - sw) / 2, r.Bottom + S(1), sw, S(2));
+            }
         }
     }
 
@@ -279,26 +369,7 @@ class GlassPopup : Form
         return (int)Math.Round(Math.Max(0, Math.Min(100, v)));
     }
 
-    void Push(Bitmap bmp)
-    {
-        IntPtr screen = Glass.GetDC(IntPtr.Zero), mem = Glass.CreateCompatibleDC(screen);
-        IntPtr hbmp = bmp.GetHbitmap(Color.FromArgb(0)), old = Glass.SelectObject(mem, hbmp);
-        try
-        {
-            var size = new Glass.SIZE(bmp.Width, bmp.Height);
-            var src = new Glass.POINT(0, 0);
-            var dst = new Glass.POINT(Left, Top);
-            var blend = new Glass.BLENDFUNCTION { Op = 0, Flags = 0, Alpha = 255, Format = 1 /* AC_SRC_ALPHA */ };
-            Glass.UpdateLayeredWindow(Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2 /* ULW_ALPHA */);
-        }
-        finally
-        {
-            Glass.SelectObject(mem, old);
-            Glass.DeleteObject(hbmp);
-            Glass.DeleteDC(mem);
-            Glass.ReleaseDC(IntPtr.Zero, screen);
-        }
-    }
+    void Push(Bitmap bmp) { Glass.Push(this, bmp, 255); }
 
     // ---------------------------------------------------------------- input
     Slider SliderAt(Point p)
@@ -311,10 +382,22 @@ class GlassPopup : Form
         return null;
     }
 
+    Slider TileAt(Point p)
+    {
+        foreach (var sl in sliders) if (!sl.Tile.IsEmpty && sl.Tile.Contains(p)) return sl;
+        return null;
+    }
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Left) return;
         if (toggleRect.Contains(e.Location)) { SetAuto(!ctl.S.Auto); return; }
+        var tile = TileAt(e.Location);
+        if (tile != null)
+        {
+            IdentifyOverlay.ShowFor(tile.Disp == null ? ctl.Displays : new List<Display> { tile.Disp });
+            return;
+        }
         foreach (var it in items) if (it.Rect.Contains(e.Location)) { it.Click(); return; }
         dragging = SliderAt(e.Location);
         if (dragging != null) Change(dragging, ValueAt(dragging, e.X));
@@ -325,12 +408,22 @@ class GlassPopup : Form
         if (dragging != null) { Change(dragging, ValueAt(dragging, e.X)); return; }
         Item h = null;
         foreach (var it in items) if (it.Rect.Contains(e.Location)) h = it;
-        Cursor = h != null || toggleRect.Contains(e.Location) || SliderAt(e.Location) != null ? Cursors.Hand : Cursors.Default;
-        if (h != hover) { hover = h; Render(); }
+        var ht = TileAt(e.Location);
+        Cursor = h != null || ht != null || toggleRect.Contains(e.Location) || SliderAt(e.Location) != null ? Cursors.Hand : Cursors.Default;
+        if (ht != hoverTile)
+        {
+            if (ht != null) tip.Show(L.Identify, this, (int)ht.Tile.X, (int)(ht.Tile.Bottom + S(4)), 1500);
+            else tip.Hide(this);
+        }
+        if (h != hover || ht != hoverTile) { hover = h; hoverTile = ht; Render(); }
     }
 
     protected override void OnMouseUp(MouseEventArgs e) { dragging = null; }
-    protected override void OnMouseLeave(EventArgs e) { if (hover != null) { hover = null; Render(); } }
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        tip.Hide(this);
+        if (hover != null || hoverTile != null) { hover = null; hoverTile = null; Render(); }
+    }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {

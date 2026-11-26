@@ -55,12 +55,30 @@ abstract class Display
     public uint Current;
     public Rectangle Bounds;   // desktop coordinates; Empty if unknown
     public bool Primary;
+    public string DeviceId;    // "\\?\DISPLAY#LEN66F2#5&...#{guid}"; null if unknown
+
+    // what the app last asked for; the health check re-sends it to a monitor that missed it
+    public volatile int Desired = -1;
+    public volatile bool Dirty;    // written but not yet read back
+    protected int retries;
+    bool lastApplyOk = true;
 
     public abstract bool Read();
     public abstract bool Set(uint percent);
     public virtual void Release() { }
 
     public int Percent { get { return Max == 0 ? 0 : (int)Math.Round(Current * 100.0 / Max); } }
+
+    public bool Apply(int percent)
+    {
+        Desired = percent;
+        Dirty = true;
+        retries = 0;
+        bool ok = Set((uint)percent);
+        if (ok != lastApplyOk) Log.Write("{0}: write {1} % {2}", Name, percent, ok ? "ok again" : "FAILED (off?), will retry");
+        lastApplyOk = ok;
+        return ok;
+    }
 
     // all controllable displays, ordered like the Windows arrangement (left to right, then top to bottom)
     public static List<Display> EnumerateAll()
@@ -163,7 +181,7 @@ class LaptopPanel : Display
             if (us > 0) pnp = pnp.Substring(0, us);
             string key = ("#" + parts[1] + "#" + pnp + "#").ToUpperInvariant();
             foreach (var o in Outputs())
-                if (o.DeviceId != null && o.DeviceId.ToUpperInvariant().Contains(key)) { Bounds = o.Bounds; Primary = o.Primary; return; }
+                if (o.DeviceId != null && o.DeviceId.ToUpperInvariant().Contains(key)) { Bounds = o.Bounds; Primary = o.Primary; DeviceId = o.DeviceId; return; }
         }
         catch { }
     }
@@ -205,14 +223,53 @@ class Monitor : Display
     const byte VcpBrightness = 0x10;
     readonly object ddcLock = new object();
 
-    public IntPtr Handle;
+    public IntPtr Handle;          // small integer, 0 is a valid handle
+    bool released;
+    public volatile bool Offline;  // last health check got no DDC/CI answer (monitor switched off)
 
-    public override void Release() { Native.DestroyPhysicalMonitor(Handle); }
+    public override void Release()
+    {
+        lock (ddcLock)
+        {
+            if (!released) Native.DestroyPhysicalMonitor(Handle);
+            released = true;
+        }
+    }
+
+    // Periodic check. A monitor that is switched off ignores DDC/CI, so writes made meanwhile
+    // (e.g. the morning brightening) are lost; once it answers again, send it what it missed.
+    // Also reads back fresh writes, because some monitors accept a write and drop it.
+    // Values set via the monitor's own buttons are left alone.
+    public void Heal()
+    {
+        lock (ddcLock)
+        {
+            if (released) return;
+            bool wasOffline = Offline;
+            if (!Read())
+            {
+                if (!wasOffline) Log.Write("{0}: no DDC/CI answer (switched off?)", Name);
+                Offline = true;
+                return;
+            }
+            Offline = false;
+            if (wasOffline) Log.Write("{0}: answering again, at {1} %", Name, Percent);
+            int want = Desired;
+            if (want < 0 || (!wasOffline && !Dirty)) return;
+            if (Math.Abs(Percent - want) <= 1 || (retries >= 3 && !wasOffline)) { Dirty = false; retries = 0; return; }
+            int was = Percent;
+            retries++;
+            bool ok = Set((uint)want);
+            Dirty = true; // read back once more on the next check
+            Log.Write("{0}: at {1} % instead of {2} %, re-sent {3}", Name, was, want, ok ? "ok" : "FAILED");
+        }
+    }
 
     public override bool Read()
     {
         lock (ddcLock)
         {
+            if (released) return false;
             // DDC/CI is flaky on some monitors; retry a few times like most tools do.
             for (int i = 0; i < 3; i++)
             {
@@ -232,6 +289,7 @@ class Monitor : Display
         uint value = (uint)Math.Round(Math.Min(percent, 100u) * Max / 100.0);
         lock (ddcLock)
         {
+            if (released) return false;
             for (int i = 0; i < 3; i++)
             {
                 if (Native.SetVCPFeature(Handle, VcpBrightness, value)) { Current = value; return true; }
@@ -259,7 +317,8 @@ class Monitor : Display
             for (uint i = 0; i < n; i++)
             {
                 var m = new Monitor { Handle = phys[i].hPhysicalMonitor };
-                m.Name = FriendlyName(info.szDevice, i) ?? phys[i].szPhysicalMonitorDescription;
+                m.DeviceId = DeviceInterface(info.szDevice, i);
+                m.Name = FriendlyName(m.DeviceId) ?? phys[i].szPhysicalMonitorDescription;
                 var r = info.rcMonitor;
                 m.Bounds = Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
                 m.Primary = (info.dwFlags & 1) != 0;
@@ -271,14 +330,20 @@ class Monitor : Display
         return all;
     }
 
-    // \\.\DISPLAY1 + index -> "\\?\DISPLAY#LEN66F2#5&..." -> EDID monitor name from registry
-    static string FriendlyName(string adapter, uint index)
+    // \\.\DISPLAY1 + index -> "\\?\DISPLAY#LEN66F2#5&..."
+    static string DeviceInterface(string adapter, uint index)
+    {
+        var dd = new Native.DISPLAY_DEVICE { cb = Marshal.SizeOf(typeof(Native.DISPLAY_DEVICE)) };
+        return Native.EnumDisplayDevices(adapter, index, ref dd, 1 /* EDD_GET_DEVICE_INTERFACE_NAME */) ? dd.DeviceID : null;
+    }
+
+    // device interface -> EDID monitor name from registry
+    static string FriendlyName(string deviceId)
     {
         try
         {
-            var dd = new Native.DISPLAY_DEVICE { cb = Marshal.SizeOf(typeof(Native.DISPLAY_DEVICE)) };
-            if (!Native.EnumDisplayDevices(adapter, index, ref dd, 1 /* EDD_GET_DEVICE_INTERFACE_NAME */)) return null;
-            var parts = dd.DeviceID.Split('#');
+            if (deviceId == null) return null;
+            var parts = deviceId.Split('#');
             if (parts.Length < 3) return null;
             using (var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + parts[1] + @"\" + parts[2] + @"\Device Parameters"))
             {

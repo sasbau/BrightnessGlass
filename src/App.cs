@@ -28,6 +28,7 @@ class Settings
     public int DayLevel = 100, NightLevel = 0;         // master level in daylight / darkness
     public int Master = 100;                           // last master value
     public bool Auto = true;
+    public int GlassStyle = Glass.Frosted;             // popup background
     // Ctrl+Alt+digit collides with AltGr on German layouts, hence F-keys for the presets
     public Keys HotkeyPanel = Keys.Control | Keys.Alt | Keys.B;
     public Keys Hotkey0 = Keys.Control | Keys.Alt | Keys.F10;
@@ -48,6 +49,7 @@ class Settings
             s.NightLevel = (int)k.GetValue("NightLevel", s.NightLevel);
             s.Master = (int)k.GetValue("Master", s.Master);
             s.Auto = (int)k.GetValue("AutoTwilight", s.Auto ? 1 : 0) == 1;
+            s.GlassStyle = Math.Max(0, Math.Min(2, (int)k.GetValue("GlassStyle", s.GlassStyle)));
             s.HotkeyPanel = (Keys)(int)k.GetValue("HotkeyPanel", (int)s.HotkeyPanel);
             s.Hotkey0 = (Keys)(int)k.GetValue("Hotkey0", (int)s.Hotkey0);
             s.Hotkey50 = (Keys)(int)k.GetValue("Hotkey50", (int)s.Hotkey50);
@@ -69,6 +71,7 @@ class Settings
             k.SetValue("NightLevel", NightLevel, RegistryValueKind.DWord);
             k.SetValue("Master", Master, RegistryValueKind.DWord);
             k.SetValue("AutoTwilight", Auto ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("GlassStyle", GlassStyle, RegistryValueKind.DWord);
             k.SetValue("HotkeyPanel", (int)HotkeyPanel, RegistryValueKind.DWord);
             k.SetValue("Hotkey0", (int)Hotkey0, RegistryValueKind.DWord);
             k.SetValue("Hotkey50", (int)Hotkey50, RegistryValueKind.DWord);
@@ -193,6 +196,7 @@ class Controller
     public List<Display> Displays = new List<Display>();
     Twilight today;
     int lastTarget = -1;
+    int lastLogged = -1;   // survives Invalidate, so rescans don't repeat the same log line
 
     public Controller(Settings s) { S = s; }
 
@@ -219,12 +223,12 @@ class Controller
         if (save) S.Save();
         var work = Displays.Select(d => new KeyValuePair<Display, int>(d, S.Map(d, master))).ToList();
         // DDC/CI writes take ~50 ms each; keep them off the UI thread
-        ThreadPool.QueueUserWorkItem(_ => { foreach (var kv in work) kv.Key.Set((uint)kv.Value); });
+        ThreadPool.QueueUserWorkItem(_ => { foreach (var kv in work) kv.Key.Apply(kv.Value); });
     }
 
     public void SetSingle(Display d, int percent)
     {
-        ThreadPool.QueueUserWorkItem(_ => d.Set((uint)percent));
+        ThreadPool.QueueUserWorkItem(_ => d.Apply(percent));
     }
 
     // timer tick; only writes when the auto target actually moved
@@ -233,6 +237,7 @@ class Controller
         if (!S.Auto) return;
         int t = AutoTarget();
         if (!force && t == lastTarget) return;
+        if (t != lastLogged) { Log.Write("auto: all -> {0} %", t); lastLogged = t; }
         lastTarget = t;
         SetMaster(t);
     }
@@ -315,6 +320,7 @@ class SettingsForm : Form
     readonly NumericUpDown lat = Num(-90, 90, 4), lon = Num(-180, 180, 4);
     readonly CheckBox autoLocate = new CheckBox { Text = L.AutoLocate, AutoSize = true, Margin = new Padding(3, 4, 3, 4) };
     readonly NumericUpDown offset = Num(0, 120, 0), laptopMin = Num(0, 100, 0), day = Num(0, 100, 0), night = Num(0, 100, 0);
+    readonly ComboBox glass = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
 
     static NumericUpDown Num(int min, int max, int dec)
     {
@@ -346,6 +352,8 @@ class SettingsForm : Form
         lat.Enabled = lon.Enabled = !s.AutoLocate;
         offset.Value = s.DimOffsetMin; laptopMin.Value = s.LaptopMin;
         day.Value = s.DayLevel; night.Value = s.NightLevel;
+        glass.Items.AddRange(new object[] { L.GlassFrosted, L.GlassLight, L.GlassClear });
+        glass.SelectedIndex = s.GlassStyle;
 
         var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Padding = new Padding(12), Dock = DockStyle.Fill };
         Header(grid, L.HdrHotkeys);
@@ -370,6 +378,8 @@ class SettingsForm : Form
         Row(grid, L.NightLevel, night);
         Header(grid, L.HdrLaptop);
         Row(grid, L.LaptopMin, laptopMin);
+        Header(grid, L.HdrAppearance);
+        Row(grid, L.PanelBackground, glass);
 
         var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true };
         var cancel = new Button { Text = L.Cancel, DialogResult = DialogResult.Cancel, AutoSize = true };
@@ -401,6 +411,7 @@ class SettingsForm : Form
         s.AutoLocate = autoLocate.Checked;
         s.DimOffsetMin = (int)offset.Value; s.LaptopMin = (int)laptopMin.Value;
         s.DayLevel = (int)day.Value; s.NightLevel = (int)night.Value;
+        s.GlassStyle = glass.SelectedIndex;
         s.Save();
     }
 }
@@ -485,12 +496,79 @@ class TrayApp : ApplicationContext
         ctl.ApplyAuto(true);
         LocateIfEnabled();
 
+        knownOutputs = OutputIds();
+        Log.Write("start {0}: {1}", Program.Version, Describe(ctl.Displays));
+        rescanTimer.Tick += (s, e) => RescanStep();
+        healthTimer.Tick += (s, e) => HealthCheck();
+        healthTimer.Start();
+
         SystemEvents.PowerModeChanged += (s, e) =>
         {
             if (e.Mode != PowerModes.Resume) return;
-            ui.Post(_ => { ctl.Invalidate(); ctl.ApplyAuto(true); LocateIfEnabled(); }, null); // maybe a new place after wake-up
+            ui.Post(_ =>
+            {
+                ctl.Invalidate(); ctl.ApplyAuto(true); LocateIfEnabled(); // maybe a new place after wake-up
+                ScheduleRescans("resume");
+            }, null);
         };
-        SystemEvents.DisplaySettingsChanged += (s, e) => ui.Post(_ => Rescan(), null);
+        SystemEvents.DisplaySettingsChanged += (s, e) => ui.Post(_ => ScheduleRescans("display settings changed"), null);
+        // coming back to the desk: check right away instead of waiting for the next tick
+        SystemEvents.SessionSwitch += (s, e) =>
+        {
+            if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect)
+                ui.Post(_ => HealthCheck(), null);
+        };
+    }
+
+    // ---- reacting to monitors that come and go --------------------------------------------
+    // A monitor switched on is often not ready for DDC/CI when Windows reports it, so rescan a few
+    // times. A monitor that stays connected while off is handled by the periodic health check.
+
+    static readonly int[] RescanDelays = { 2000, 6000, 15000, 30000, 60000, 120000 };
+    readonly System.Windows.Forms.Timer rescanTimer = new System.Windows.Forms.Timer();
+    readonly System.Windows.Forms.Timer healthTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+    int rescanStep = -1;
+    int healthBusy;
+    HashSet<string> knownOutputs;
+
+    void ScheduleRescans(string reason)
+    {
+        if (rescanStep < 0) Log.Write("rescan: {0}", reason);
+        rescanStep = 0;
+        rescanTimer.Stop();
+        rescanTimer.Interval = RescanDelays[0];
+        rescanTimer.Start();
+    }
+
+    void RescanStep()
+    {
+        rescanTimer.Stop();
+        Rescan();
+        if (++rescanStep < RescanDelays.Length) { rescanTimer.Interval = RescanDelays[rescanStep]; rescanTimer.Start(); }
+        else rescanStep = -1;
+    }
+
+    void HealthCheck()
+    {
+        var ids = OutputIds();
+        if (!ids.SetEquals(knownOutputs)) { knownOutputs = ids; ScheduleRescans("outputs changed"); return; }
+        if (Interlocked.Exchange(ref healthBusy, 1) == 1) return;
+        var monitors = ctl.Displays.OfType<Monitor>().ToList();
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { foreach (var m in monitors) m.Heal(); }
+            finally { Interlocked.Exchange(ref healthBusy, 0); }
+        });
+    }
+
+    static HashSet<string> OutputIds()
+    {
+        return new HashSet<string>(Display.Outputs().Select(o => o.DeviceId ?? ""), StringComparer.OrdinalIgnoreCase);
+    }
+
+    static string Describe(List<Display> displays)
+    {
+        return displays.Count == 0 ? "(none)" : string.Join(", ", displays.Select(d => d.Name));
     }
 
     void LocateIfEnabled()
@@ -554,15 +632,27 @@ class TrayApp : ApplicationContext
 
     void Rescan()
     {
+        var fresh = Display.EnumerateAll();
+        bool changed = Signature(fresh) != Signature(ctl.Displays);
+        if (!changed && popup.Visible) { Display.Release(fresh); return; } // don't pull the sliders away from under the mouse
         popup.Hide();
         Display.Release(ctl.Displays);
-        ctl.Displays = Display.EnumerateAll();
+        ctl.Displays = fresh;
+        knownOutputs = OutputIds();
+        if (changed) Log.Write("displays: {0}", Describe(fresh));
         ctl.Invalidate();
         if (ctl.S.Auto) ctl.ApplyAuto(true); else ctl.SetMaster(ctl.S.Master, false);
     }
 
+    static string Signature(List<Display> displays)
+    {
+        return string.Join("|", displays.Select(d => d.Name + "@" + d.DeviceId + "@" + d.Bounds));
+    }
+
     protected override void ExitThreadCore()
     {
+        healthTimer.Stop();
+        rescanTimer.Stop();
         tray.Visible = false;
         tray.Dispose();
         hotkeyWnd.Dispose();
@@ -630,6 +720,7 @@ static class Program
         using (new Mutex(true, "BrightnessDDC_SingleInstance", out created))
         {
             if (!created) return 0;
+            Log.Enabled = true;
             Glass.SetProcessDPIAware();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);

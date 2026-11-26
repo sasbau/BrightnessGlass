@@ -50,5 +50,10 @@ static class L
     public static readonly string NightLevel = T("„Alle“ nachts (%)", "\"All\" at night (%)");
     public static readonly string HdrLaptop = T("Laptop", "Laptop");
     public static readonly string LaptopMin = T("Laptop-Minimum bei „Alle“ = 0 % (in %)", "Laptop minimum when \"All\" = 0 % (in %)");
+    public static readonly string HdrAppearance = T("Darstellung", "Appearance");
+    public static readonly string PanelBackground = T("Hintergrund des Panels", "Panel background");
+    public static readonly string GlassFrosted = T("Milchglas (stark verschwommen)", "Frosted (strong blur)");
+    public static readonly string GlassLight = T("Glas (leicht verschwommen)", "Glass (light blur)");
+    public static readonly string GlassClear = T("Klar (durchsichtig, abgedunkelt)", "Clear (see-through, darkened)");
     public static readonly string Cancel = T("Abbrechen", "Cancel");
 }

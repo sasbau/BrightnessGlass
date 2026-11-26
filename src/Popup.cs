@@ -29,10 +29,16 @@ static class Glass
     [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr hwnd, IntPtr rgn, bool redraw);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 
-    // acrylic blur behind the window (Win10 1803+ / Win11); tint comes from our own pixels
-    public static void EnableBlur(IntPtr hwnd, int width, int height, int radius)
+    // background styles: 0 = frosted (acrylic, strong blur), 1 = glass (light blur), 2 = clear (no blur)
+    public const int Frosted = 0, Light = 1, Clear = 2;
+
+    // blur behind the window (Win10 1803+ / Win11); tint comes from our own pixels
+    public static void EnableBlur(IntPtr hwnd, int width, int height, int radius, int style)
     {
-        var accent = new AccentPolicy { AccentState = 4 /* ACRYLICBLURBEHIND */, AccentFlags = 2, GradientColor = 0x01101010 };
+        int state = style == Clear ? 0 /* DISABLED */ : style == Light ? 3 /* BLURBEHIND */ : 4 /* ACRYLICBLURBEHIND */;
+        // flag 2 (use the gradient colour) lays a nearly opaque dark layer over the blur on Win11, whatever
+        // the colour's alpha: that is the smoky frosted look; the lighter styles leave it off and tint themselves
+        var accent = new AccentPolicy { AccentState = state, AccentFlags = style == Frosted ? 2 : 0, GradientColor = 0x01101010 };
         int size = Marshal.SizeOf(accent);
         IntPtr p = Marshal.AllocHGlobal(size);
         try
@@ -104,6 +110,7 @@ class GlassPopup : Form
     Item hover;
     int W, H;
     readonly ToolTip tip = new ToolTip();
+    readonly TextLayer text = new TextLayer();
 
     public GlassPopup(Controller ctl, Action openSettings, Action quit, Func<string> presetHint)
     {
@@ -199,21 +206,21 @@ class GlassPopup : Form
 
                 using (var path = Glass.Round(new RectangleF(0, 0, W - 1, H - 1), S(12)))
                 {
-                    using (var b = new SolidBrush(Color.FromArgb(70, 24, 24, 28))) g.FillPath(b, path);
+                    using (var b = new SolidBrush(Color.FromArgb(TintAlpha(), 24, 24, 28))) g.FillPath(b, path);
                     using (var pen = new Pen(Color.FromArgb(70, 255, 255, 255), 1)) g.DrawPath(pen, path);
                 }
 
                 // card 1: auto
                 float y = pad;
                 Card(g, new RectangleF(pad, y, cardW, S(64)));
-                g.DrawString(L.AutoTitle, fTitle, Brushes.White, pad + cp, y + S(12));
-                using (var b = new SolidBrush(Color.FromArgb(170, 255, 255, 255))) g.DrawString(status, fSmall, b, pad + cp, y + S(36));
+                DrawText(L.AutoTitle, fTitle, Color.White, pad + cp, y + S(12));
+                DrawText(status, fSmall, Color.FromArgb(170, 255, 255, 255), pad + cp, y + S(36));
                 Toggle(g, toggleRect, ctl.S.Auto);
                 y += S(64) + S(10);
 
                 // card 2: master
                 Card(g, new RectangleF(pad, y, cardW, S(88)));
-                g.DrawString(L.AllDisplays, fTitle, Brushes.White, pad + cp, y + S(13));
+                DrawText(L.AllDisplays, fTitle, Color.White, pad + cp, y + S(13));
                 DrawSlider(g, sliders[0]);
                 DrawTile(g, sliders[0]);
                 y += S(88) + S(10);
@@ -227,9 +234,8 @@ class GlassPopup : Form
                     {
                         var sl = sliders[i];
                         float ny = sl.Track.Y - S(25);
-                        using (var b = new SolidBrush(Color.FromArgb(225, 255, 255, 255)))
-                            g.DrawString(sl.Disp.Name, fTitle, b, pad + cp, ny);
-                        if (sl.Disp.Primary) DrawTag(g, L.PrimaryTag, pad + cp + g.MeasureString(sl.Disp.Name, fTitle).Width + S(4), ny + S(1));
+                        DrawText(sl.Disp.Name, fTitle, Color.FromArgb(225, 255, 255, 255), pad + cp, ny);
+                        if (sl.Disp.Primary) DrawTag(g, L.PrimaryTag, pad + cp + Pad(fTitle) + TextLayer.Measure(sl.Disp.Name, fTitle).Width + S(8), ny + S(1));
                         DrawSlider(g, sl);
                         DrawTile(g, sl);
                     }
@@ -241,17 +247,24 @@ class GlassPopup : Form
                     if (it == hover)
                         using (var b = new SolidBrush(Color.FromArgb(38, 255, 255, 255)))
                         using (var p = Glass.Round(it.Rect, S(6))) g.FillPath(b, p);
-                    var sf = new StringFormat { LineAlignment = StringAlignment.Center };
-                    g.DrawString(it.Text, fText, Brushes.White, new RectangleF(it.Rect.X + S(8), it.Rect.Y, it.Rect.Width, it.Rect.Height), sf);
+                    DrawText(it.Text, fText, Color.White, new RectangleF(it.Rect.X + S(8), it.Rect.Y, it.Rect.Width, it.Rect.Height), StringAlignment.Near, StringAlignment.Center);
                     if (!string.IsNullOrEmpty(it.Hint))
-                    {
-                        sf.Alignment = StringAlignment.Far;
-                        using (var b = new SolidBrush(Color.FromArgb(130, 255, 255, 255)))
-                            g.DrawString(it.Hint, fSmall, b, new RectangleF(it.Rect.X, it.Rect.Y, it.Rect.Width - S(8), it.Rect.Height), sf);
-                    }
+                        DrawText(it.Hint, fSmall, Color.FromArgb(130, 255, 255, 255), new RectangleF(it.Rect.X, it.Rect.Y, it.Rect.Width - S(8), it.Rect.Height), StringAlignment.Far, StringAlignment.Center);
                 }
             }
+            text.RenderTo(bmp);
             Push(bmp);
+        }
+    }
+
+    // darker tint the less the background is blurred, so text stays readable
+    int TintAlpha()
+    {
+        switch (ctl.S.GlassStyle)
+        {
+            case Glass.Clear: return 150;
+            case Glass.Light: return 90;
+            default: return 70;
         }
     }
 
@@ -266,12 +279,11 @@ class GlassPopup : Form
 
     void DrawTag(Graphics g, string text, float x, float y)
     {
-        var sz = g.MeasureString(text, fSmall);
-        var r = new RectangleF(x, y, sz.Width + S(8), S(19));
+        var sz = TextLayer.Measure(text, fSmall);
+        var r = new RectangleF(x, y, sz.Width + S(12), S(19));
         using (var p = Glass.Round(r, S(6)))
         using (var b = new SolidBrush(Color.FromArgb(50, 255, 255, 255))) g.FillPath(b, p);
-        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        using (var b = new SolidBrush(Color.FromArgb(230, 255, 255, 255))) g.DrawString(text, fSmall, b, r, sf);
+        this.text.Draw(text, fSmall, Color.FromArgb(230, 255, 255, 255), r, StringAlignment.Center, StringAlignment.Center);
     }
 
     // miniature of the Windows arrangement; this display filled, the others outlined (master: all filled)
@@ -351,9 +363,18 @@ class GlassPopup : Form
         using (var sh = new SolidBrush(Color.FromArgb(45, 0, 0, 0))) g.FillEllipse(sh, cx - rad, t.Y + S(1), t.Height, t.Height);
         using (var pen = new Pen(Color.FromArgb(35, 0, 0, 0), 1)) { g.FillEllipse(Brushes.White, cx - rad, t.Y, t.Height, t.Height); g.DrawEllipse(pen, cx - rad, t.Y, t.Height, t.Height); }
 
-        var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
-        using (var b = new SolidBrush(Color.FromArgb(220, 255, 255, 255)))
-            g.DrawString(sl.Value + "%", fValue, b, new RectangleF(t.Right, t.Y, S(52), t.Height), sf);
+        DrawText(sl.Value + "%", fValue, Color.FromArgb(220, 255, 255, 255), new RectangleF(t.Right, t.Y, S(52), t.Height), StringAlignment.Far, StringAlignment.Center);
+    }
+
+    // GDI+ DrawString used to inset text by 1/6 em; keep that so the layout stays put
+    static float Pad(Font f) { return f.SizeInPoints * 96f / 72f / 6f; }
+
+    void DrawText(string s, Font f, Color c, float x, float y) { text.Draw(s, f, c, x + Pad(f), y); }
+
+    void DrawText(string s, Font f, Color c, RectangleF r, StringAlignment h, StringAlignment v)
+    {
+        r.Inflate(-Pad(f), 0);
+        text.Draw(s, f, c, r, h, v);
     }
 
     float KnobX(Slider sl)
@@ -491,7 +512,7 @@ class GlassPopup : Form
         var wa = Screen.PrimaryScreen.WorkingArea;
         SetBounds(wa.Right - W - (int)S(12), wa.Bottom - H - (int)S(12), W, H);
         Show();
-        Glass.EnableBlur(Handle, W, H, (int)S(12));
+        Glass.EnableBlur(Handle, W, H, (int)S(12), ctl.S.GlassStyle);
         Render();
         Activate();
     }

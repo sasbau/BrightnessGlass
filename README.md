@@ -13,7 +13,9 @@ A small Windows tray app to control the brightness of your **laptop panel and ex
 - **"All" master slider**: external monitors follow it 1:1, the laptop panel keeps a configurable floor (default 12 %), so at 0 % the room goes dark but the laptop stays readable. At 100 % everything is at full brightness.
 - **Follow the sun**: dimming starts a configurable number of minutes before sunset (default 15) and ends at civil dusk; in the morning it runs the other way. The day/night levels are learned when you move "All" while automatic mode is on.
 - **Location** is taken from the Windows location service (rounded to ~1 km, no web request) or entered manually. The default before a fix is the centre of Germany.
+- **Monitors that come and go**: a monitor switched off in the evening (or unplugged) misses the morning brightening. BrightnessGlass notices when it answers again or reappears and sends it the current level, typically within 30 seconds (right away when you unlock Windows). Changes made with the monitor's own buttons are left alone.
 - **Global hotkeys** (configurable): `Ctrl+Alt+B` opens the panel, `Ctrl+Alt+F10/F11/F12` set all displays to 0/50/100 %.
+- **Panel background** to taste: frosted (strong blur), glass (light blur) or clear (see-through, darkened), in the settings.
 - **German and English UI**, following the Windows display language.
 - Single ~45 KB exe, no installer, no runtime besides .NET Framework 4.x (part of Windows 10/11).
 
@@ -44,7 +46,7 @@ BrightnessGlass.exe sun           # today's twilight schedule
 BrightnessGlass.exe --version
 ```
 
-Settings are stored per user in `HKCU\Software\BrightnessDDC`.
+Settings are stored per user in `HKCU\Software\BrightnessDDC`. A small diagnostic log (display changes, monitors going silent and coming back, automatic changes) is written to `%LOCALAPPDATA%\BrightnessGlass\BrightnessGlass.log` (max. 512 KB, one old generation kept).
 
 ## Limitations
 
@@ -76,7 +78,9 @@ BrightnessGlass ist eine kleine Tray-App für Windows, die die Helligkeit von **
 - **Regler „Alle“**: Externe Monitore folgen 1:1, der Laptop behält eine einstellbare Untergrenze (Standard 12 %).
 - **Nach Sonnenstand**: Dimmen beginnt X Minuten vor Sonnenuntergang (Standard 15) und endet in der bürgerlichen Dämmerung; morgens umgekehrt. Verschiebst du „Alle“ bei aktiver Automatik, merkt sich die App das als neuen Tag- bzw. Nachtwert.
 - **Standort** über den Windows-Standortdienst (auf ~1 km gerundet, keine Webanfrage) oder manuell.
+- **Monitore, die kommen und gehen**: Ein abends ausgeschalteter (oder abgesteckter) Monitor verpasst das morgendliche Aufhellen. BrightnessGlass merkt, wenn er wieder antwortet oder auftaucht, und schickt ihm den aktuellen Wert, meist innerhalb von 30 Sekunden (beim Entsperren sofort). Was du am Monitor selbst einstellst, bleibt unangetastet.
 - **Hotkeys** (änderbar): `Strg+Alt+B` öffnet das Panel, `Strg+Alt+F10/F11/F12` setzen alle auf 0/50/100 %.
+- **Hintergrund des Panels** nach Geschmack: Milchglas (stark verschwommen), Glas (leicht verschwommen) oder klar (durchsichtig, abgedunkelt), in den Einstellungen.
 - **Deutsch und Englisch**, je nach Windows-Anzeigesprache.
 
 **Installation:** `BrightnessGlass.exe` aus dem [neuesten Release](https://github.com/sasbau/BrightnessGlass/releases/latest) laden, an einen beliebigen Ort legen und starten. Rechtsklick aufs Tray-Symbol → *Mit Windows starten*. Die Exe ist nicht signiert, SmartScreen warnt beim ersten Start eventuell (*Weitere Informationen → Trotzdem ausführen*).

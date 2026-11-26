@@ -4,7 +4,10 @@
 
 A small Windows tray app to control the brightness of your **laptop panel and external monitors** from one glassy, macOS-style panel – with automatic dimming at dusk.
 
+<img height="300" alt="image" src="https://github.com/user-attachments/assets/07c6f82f-c9eb-4989-a0a2-d3d8eee29481" />
+
 *[Deutsche Beschreibung weiter unten](#deutsch)*
+
 
 ## Features
 
